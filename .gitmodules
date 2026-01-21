@@ -1,0 +1,3 @@
+[submodule "cashu-wallet-php"]
+	path = cashu-wallet-php
+	url = https://github.com/jooray/cashu-wallet-php

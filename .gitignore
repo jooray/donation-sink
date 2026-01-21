@@ -1,0 +1,26 @@
+# Configuration file with secrets
+config.php
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+CLAUDE.md
+.claude/**

@@ -1,0 +1,57 @@
+<?php
+/**
+ * Donation Sink Configuration Template
+ *
+ * Copy this file to config.php and fill in your values.
+ * IMPORTANT: config.php should NEVER be committed to version control.
+ */
+
+return [
+    /**
+     * Database path - MUST be outside webroot for security
+     * The SQLite database will be created automatically on first use
+     */
+    'database_path' => '/path/outside/webroot/donations.db',
+
+    /**
+     * Seed phrase for wallet generation
+     * Generate using: php generate-seed.php
+     * This is a 12-word BIP39 mnemonic phrase
+     * KEEP THIS SECRET - anyone with this seed can access all donations
+     */
+    'seed_phrase' => 'word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12',
+
+    /**
+     * Lightning address where melted funds will be sent
+     * Format: username@domain.com
+     */
+    'lightning_address' => 'donations@example.com',
+
+    /**
+     * Auto-melt thresholds per currency unit
+     * When a mint+unit balance reaches this threshold, automatically melt to Lightning
+     *
+     * Units:
+     * - sat: satoshis (Bitcoin base unit)
+     * - usd: cents (100 = $1.00)
+     * - eur: cents (100 = €1.00)
+     */
+    'melt_thresholds' => [
+        'sat' => 500,      // Melt when balance reaches 500 sats
+        'usd' => 100,      // Melt when balance reaches 100 cents ($1.00)
+        'eur' => 100,      // Melt when balance reaches 100 cents (€1.00)
+    ],
+
+    /**
+     * Log file path for recording donations and melt operations
+     * MUST be writable by the web server
+     */
+    'log_path' => '/path/outside/webroot/donations.log',
+
+    /**
+     * Default threshold for unknown currency units
+     * If a donation comes in with a unit not listed in melt_thresholds,
+     * use this value (in that unit's base denomination)
+     */
+    'default_melt_threshold' => 100,
+];
