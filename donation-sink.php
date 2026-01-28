@@ -123,6 +123,12 @@ try {
     // Initialize with seed phrase
     $wallet->initFromMnemonic($config['seed_phrase']);
 
+    // Recover any pending melt operations before processing new donation
+    $recovery = $wallet->recoverPendingMelts();
+    if ($recovery['checked'] > 0) {
+        logMessage("INFO: Recovered pending melts - Paid: {$recovery['paid']}, Restored: {$recovery['restored']}, Still pending: {$recovery['still_pending']}", $config);
+    }
+
     // Receive (swap) the token - this prevents re-spending
     $newProofs = $wallet->receive($token);
     $receivedAmount = Wallet::sumProofs($newProofs);
