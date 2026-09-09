@@ -28,6 +28,19 @@ return [
     'lightning_address' => 'donations@example.com',
 
     /**
+     * Mints this sink is willing to accept donations from.
+     *
+     * The mint URL is read out of the token the donor sends, and this script then
+     * connects to it — so an empty list means strangers choose what your server talks to.
+     * Leaving it empty is supported and restricts connections to public HTTPS mints,
+     * which is enough to stop the endpoint being used to probe your internal network.
+     * Naming the mints you actually expect is stronger, and costs nothing:
+     *
+     *   'accepted_mints' => ['https://mint.example.com', 'https://mint.other.org'],
+     */
+    'accepted_mints' => [],
+
+    /**
      * Auto-melt thresholds per currency unit
      * When a mint+unit balance reaches this threshold, automatically melt to Lightning
      *

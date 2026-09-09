@@ -61,6 +61,66 @@ function logMessage(string $message, array $config): void {
 }
 
 /**
+ * Strip anything that could forge a log line out of untrusted text.
+ *
+ * Mint URLs and units arrive inside a token supplied by whoever POSTs it, and they are
+ * written straight into a line-oriented log file.
+ */
+function logSafe(string $value, int $max = 200): string {
+    $clean = preg_replace('/[\x00-\x1f\x7f]/', ' ', $value) ?? '';
+    return mb_substr($clean, 0, $max);
+}
+
+/**
+ * Is this a mint we are willing to connect to?
+ *
+ * With `accepted_mints` configured, only those. Otherwise any public HTTPS mint — which
+ * still rules out the loopback and private-network targets that make this endpoint
+ * useful as an internal port scanner.
+ */
+function isAcceptableMint(string $mintUrl, array $config): bool {
+    $parts = parse_url($mintUrl);
+    if (!$parts || empty($parts['host']) || empty($parts['scheme'])) {
+        return false;
+    }
+
+    $allowed = $config['accepted_mints'] ?? [];
+    if (!empty($allowed)) {
+        $canonical = fn(string $u) => rtrim(strtolower(trim($u)), '/');
+        return in_array($canonical($mintUrl), array_map($canonical, $allowed), true);
+    }
+
+    // HTTPS only, except .onion, which cannot have a public certificate.
+    $host = strtolower($parts['host']);
+    $scheme = strtolower($parts['scheme']);
+    if ($scheme !== 'https' && !($scheme === 'http' && str_ends_with($host, '.onion'))) {
+        return false;
+    }
+    if (isset($parts['user']) || isset($parts['pass'])) {
+        return false;
+    }
+
+    // Every address the name resolves to must be public. A name resolving to 127.0.0.1
+    // is the same attack wearing a hostname.
+    $ips = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : (@gethostbynamel($host) ?: []);
+    foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $rec) {
+        if (!empty($rec['ipv6'])) {
+            $ips[] = $rec['ipv6'];
+        }
+    }
+    if (empty($ips)) {
+        return false; // cannot resolve: fail closed
+    }
+    foreach ($ips as $ip) {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * Send JSON response and exit
  */
 function sendResponse(int $httpCode, string $status, string $message, array $config, ?string $logMsg = null): void {
@@ -114,14 +174,33 @@ try {
     $unit = $tokenData->unit;
     $amount = $tokenData->getAmount();
 
-    logMessage("INFO: Received donation - Mint: $mintUrl, Unit: $unit, Amount: $amount", $config);
+    // The mint URL comes out of a token a stranger POSTed, and the next thing this
+    // script does is connect to it. Left unchecked that makes a public, unauthenticated
+    // port scanner: the log for August 2026 is full of fabricated tokens naming
+    // http://127.0.0.1:<random port>, each one probing whether something answers there.
+    if (!isAcceptableMint($mintUrl, $config)) {
+        sendResponse(400, 'error', 'This mint is not accepted', $config,
+            'REJECTED: mint not accepted - ' . logSafe($mintUrl));
+    }
+
+    logMessage("INFO: Received donation - Mint: " . logSafe($mintUrl)
+        . ", Unit: " . logSafe($unit) . ", Amount: $amount", $config);
 
     // Initialize wallet for this mint+unit combination
     $wallet = new Wallet($mintUrl, $unit, $config['database_path']);
     $wallet->loadMint();
 
-    // Initialize with seed phrase
-    $wallet->initFromMnemonic($config['seed_phrase']);
+    // Bind the seed to this wallet's storage. Which call is correct depends on what is
+    // already there, and the library deliberately refuses to guess: getting it wrong is
+    // how a wallet reissues secrets it has already used and destroys funds.
+    $storage = $wallet->getStorage();
+    if ($storage->getSeedFingerprint() !== null) {
+        $wallet->initFromMnemonic($config['seed_phrase']);          // known, already ours
+    } elseif ($storage->hasWalletData()) {
+        $wallet->adoptSeedForExistingStorage($config['seed_phrase']); // predates fingerprints
+    } else {
+        $wallet->initializeNewFromMnemonic($config['seed_phrase']);   // brand new mint+unit
+    }
 
     // Recover any pending melt operations before processing new donation
     $recovery = $wallet->recoverPendingMelts();
@@ -178,12 +257,14 @@ try {
     sendResponse(200, 'success', 'thank you', $config, null);
 
 } catch (CashuException $e) {
-    // Token processing failed
-    $errorMsg = $e->getMessage();
-    sendResponse(500, 'error', 'Token processing failed', $config, "ERROR: Token processing failed - $errorMsg");
+    // A token we could not accept. 400, not 500: the sender's input is the problem, and
+    // a 500 tells an honest donor to keep retrying something that will never work.
+    sendResponse(400, 'error', 'Token processing failed', $config,
+        'ERROR: Token processing failed - ' . logSafe($e->getMessage(), 300));
 
-} catch (Exception $e) {
-    // Unexpected error
-    $errorMsg = $e->getMessage();
-    sendResponse(500, 'error', 'Internal server error', $config, "ERROR: Unexpected error - $errorMsg");
+} catch (Throwable $e) {
+    // Genuinely our fault. Throwable, not Exception: a malformed token can raise a
+    // TypeError, which would otherwise escape as an unlogged blank 500.
+    sendResponse(500, 'error', 'Internal server error', $config,
+        'ERROR: Unexpected error - ' . logSafe(get_class($e) . ': ' . $e->getMessage(), 300));
 }
