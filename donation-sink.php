@@ -21,6 +21,7 @@
 
 require_once __DIR__ . '/cashu-wallet-php/CashuWallet.php';
 require_once __DIR__ . '/accounting.php';
+require_once __DIR__ . '/held.php';
 
 use Cashu\Wallet;
 use Cashu\TokenSerializer;
@@ -137,6 +138,74 @@ function isAcceptableMint(string $mintUrl, array $config): bool {
 /**
  * Send JSON response and exit
  */
+/**
+ * Keep a donation the mint would eat, and settle the pool once it pays for itself.
+ *
+ * Returns the message to answer with, or null when this was not a fee problem and
+ * the caller should fail as it always did.
+ *
+ * The answer is a plain 200 even though nothing has been swapped yet, and that is
+ * deliberate rather than sloppy. The sender does not take our word for it: it keeps
+ * its copy and asks the mint whether the proofs are spent, which for a held token is
+ * not yet, so it retries and we recognise the same secrets and do not count it twice.
+ * When the batch finally swaps, the proofs go spent and the sender completes the
+ * transfer on its own. A new status code would have said the same thing to any
+ * sender that understood it and broken every sender that did not.
+ */
+function holdBelowFee(DonationSink\Held $held, Wallet $wallet, CashuException $error, string $token,
+                      string $poolMint, string $poolUnit, int $amount, ?string $project,
+                      array $config, ?DonationSink\Accounting $accounting): ?string {
+    // Only the fee. Anything else — a spent token, a locked proof, an unreachable
+    // mint — is a real failure and the donor must hear about it.
+    if (stripos($error->getMessage(), 'less than or equal to fee') === false) {
+        return null;
+    }
+
+    try {
+        $parsed = \Cashu\TokenSerializer::deserialize($token);
+        $secrets = array_map(fn($p) => $p->secret, $parsed->proofs);
+        $result = $held->hold($token, $poolMint, $poolUnit, $amount, $secrets, $project);
+    } catch (Throwable $e) {
+        logMessage('HELD ERROR: could not hold a below-fee donation - ' . logSafe($e->getMessage(), 300), $config);
+        return null;
+    }
+
+    if ($result === 'full') {
+        return null; // a pool that never settles must not grow for ever
+    }
+
+    $pool = $held->pool($poolMint, $poolUnit);
+    logMessage(($result === 'duplicate' ? 'HELD: already holding this donation' : 'HELD: keeping a below-fee donation')
+        . " - Mint: " . logSafe($poolMint) . ", Unit: " . logSafe($poolUnit) . ", Amount: $amount"
+        . ", Project: " . ($project ?? '-')
+        . " - pool now {$pool['tokens']} token(s), {$pool['proofs']} proof(s), {$pool['amount']} {$poolUnit}", $config);
+
+    // Nothing below here may cost the donor their answer: the money is held either
+    // way, and a pool that could not settle today settles on the next donation.
+    try {
+        $settled = $held->settle($wallet, $poolMint, $poolUnit);
+        if ($settled !== null) {
+            logMessage("SUCCESS: Settled held donations - Mint: " . logSafe($poolMint)
+                . ", Unit: " . logSafe($poolUnit) . ", In: {$settled['swapped']}"
+                . ", Fee: {$settled['fee']}, Credited: {$settled['credited']}", $config);
+            // Income exists now and not before, one row per donation, each under the
+            // project that sent it and carrying its share of one shared fee.
+            if ($accounting !== null) {
+                foreach ($settled['tokens'] as $t) {
+                    $accounting->recordDonation($poolMint, $poolUnit, (int)$t['amount'],
+                        (int)$t['credited'], $t['project'] !== null ? (string)$t['project'] : null);
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        logMessage('HELD ERROR: could not settle the pool - ' . logSafe($e->getMessage(), 300), $config);
+    }
+
+    return $result === 'duplicate'
+        ? 'Already holding this donation until it can be swapped'
+        : 'Donation held until it is worth swapping at this mint';
+}
+
 function sendResponse(int $httpCode, string $status, string $message, array $config, ?string $logMsg = null, array $extra = []): void {
     http_response_code($httpCode);
     echo json_encode(array_merge([
@@ -199,9 +268,11 @@ if ($projectError !== null) {
         'REJECTED: bad project name - ' . logSafe(is_string($rawProject) ? $rawProject : gettype($rawProject), 80));
 }
 
-$accounting = Accounting::fromConfig($config, function (string $message) use ($config) {
+$logger = function (string $message) use ($config) {
     logMessage($message, $config);
-});
+};
+$accounting = Accounting::fromConfig($config, $logger);
+$held = DonationSink\Held::fromConfig($config, $logger);
 
 try {
     // Deserialize token to get mint and unit
@@ -275,8 +346,23 @@ try {
         }
     }
 
-    // Receive (swap) the token - this prevents re-spending
-    $newProofs = $wallet->receive($token);
+    // Receive (swap) the token - this prevents re-spending.
+    //
+    // A token whose proofs cost more to swap than they are worth cannot be taken
+    // alone, and refusing it is the only honest answer while the sink swaps one
+    // donation at a time. Holding it instead is worth doing because the mint charges
+    // per swap, not per donation: ten 1 sat proofs cost the same one satoshi as one
+    // of them. So try the swap, and if it fails only because of the fee, keep the
+    // token until the pool pays for itself.
+    try {
+        $newProofs = $wallet->receive($token);
+    } catch (CashuException $e) {
+        $outcome = $held === null ? null : holdBelowFee($held, $wallet, $e, $token, $poolMint, $poolUnit, $amount, $project, $config, $accounting);
+        if ($outcome === null) {
+            throw $e;
+        }
+        sendResponse(200, 'success', $outcome, $config);
+    }
     $receivedAmount = Wallet::sumProofs($newProofs);
 
     logMessage("SUCCESS: Swapped donation - Mint: $mintUrl, Unit: $unit, Amount: $receivedAmount"

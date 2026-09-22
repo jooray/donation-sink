@@ -187,6 +187,47 @@ Error:
 }
 ```
 
+## Donations too small to swap (optional)
+
+A NUT-02 mint charges a fee **per input proof** and rounds the whole swap up once:
+`ceil(sum(input_fee_ppk) / 1000)`. On a mint charging 100 ppk a single proof costs a
+whole satoshi, so a 1 sat donation nets its recipient nothing and the sink can only
+refuse it. Ten of them cost that same one satoshi between them and net nine. The fee
+belongs to the swap, not to the donation, so the answer is to stop swapping one
+donation at a time.
+
+With `held_donations.enabled` on, a token that cannot pay for its own swap is kept
+instead of refused, and the pool is swapped in a single operation as soon as the
+mint's share is no worse than `max_fee_percent`. At 100 ppk and 1 sat donations that
+is exactly ten, twenty, thirty proofs: ten cost one satoshi between them, eleven cost
+two.
+
+**A held token is not income and not yours.** It has not been swapped, so the donor
+still holds its secrets and can spend them first. Held money is therefore kept out of
+the wallet, out of `getBalance()` and out of the ledger until the batch swap succeeds,
+and the mint is asked which proofs are still unspent before the swap is built, so one
+donor taking their ecash back cannot stop a pool settling. The risk you take is on
+money that was worth exactly nothing to you; the risk you add is that `held.db` holds
+other people's bearer secrets until the swap, so give it the care you give the wallet.
+
+The sink answers **200** for a held token, on purpose. A sender does not have to take
+our word for it: CashuPayServer, for one, keeps its copy and asks the mint whether the
+proofs are spent, so it simply retries until the batch settles, and the same secrets
+are recognised rather than counted twice. A new status code would have told that to
+every sender that understood it and broken every sender that did not.
+
+```php
+'held_donations' => [
+    'enabled'             => true,
+    'database_path'       => null,   // defaults to held.db beside the wallet
+    'max_fee_percent'     => 10,
+    'max_tokens_per_pool' => 500,
+],
+```
+
+Run `php tests/held_donations.php` to watch it happen against a mint that really
+charges 100 ppk.
+
 ## Per-project accounting (optional)
 
 One sink can receive for many projects. A donation says who it is for, and a

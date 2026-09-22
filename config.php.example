@@ -90,6 +90,35 @@ return [
      * ASCII letters, digits, dot, dash or underscore, starting with a letter or a
      * digit. A donation with no project keeps working and is recorded as unnamed.
      */
+    /**
+     * Donations too small to swap on their own.
+     *
+     * A NUT-02 mint charges per input proof and rounds the whole swap up once, so on
+     * a mint charging 100 ppk a 1 sat donation costs 1 sat to redeem and nets nothing.
+     * Ten of them cost that same satoshi between them. With this on, a donation that
+     * cannot pay for its own swap is kept and answered 200, and the pool is swapped in
+     * one go as soon as the mint's cut is no worse than max_fee_percent.
+     *
+     * Off by default, because it changes what a 200 means. A held token has not been
+     * swapped, so the donor can still spend it first; the money at stake is money that
+     * was worth exactly nothing to you, but this database holds other people's bearer
+     * secrets until the swap and deserves the same care as the wallet.
+     */
+    'held_donations' => [
+        'enabled' => false,
+
+        // Defaults to held.db beside the wallet database.
+        'database_path' => null,
+
+        // Swap once the mint's share of the pool is no worse than this. At 100 ppk and
+        // 1 sat donations, 10 means it fires at exactly ten, twenty, thirty proofs:
+        // ten cost one satoshi between them, eleven cost two.
+        'max_fee_percent' => 10,
+
+        // A pool at a mint that never becomes swappable must not grow for ever.
+        'max_tokens_per_pool' => 500,
+    ],
+
     'project' => [
         // Refuse anything longer than this (1-64).
         'max_length' => 64,
