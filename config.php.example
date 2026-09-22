@@ -67,4 +67,90 @@ return [
      * use this value (in that unit's base denomination)
      */
     'default_melt_threshold' => 100,
+
+    /**
+     * ---------------------------------------------------------------------
+     * Everything below is optional. Leave it out entirely and the sink works
+     * exactly as it always has: SQLite for the wallet, no second database.
+     * ---------------------------------------------------------------------
+     */
+
+    /**
+     * Project names.
+     *
+     * A donation can say who it is for:
+     *
+     *   curl -X POST https://example.com/donation-sink.php \
+     *        -H 'Content-Type: application/json' \
+     *        -d '{"token":"cashuB...","project":"some-project"}'
+     *
+     * The project also works as a form field or as `?project=...` in the query
+     * string. Nothing has to be configured first: the first donation that names a
+     * project creates it. A name is lowercased and must be 1 to 64 characters of
+     * ASCII letters, digits, dot, dash or underscore, starting with a letter or a
+     * digit. A donation with no project keeps working and is recorded as unnamed.
+     */
+    'project' => [
+        // Refuse anything longer than this (1-64).
+        'max_length' => 64,
+
+        // Leave empty to accept any well-formed name, which is the point of the
+        // feature. Fill it in only if you would rather have a fixed list:
+        //   'allowed' => ['website', 'podcast'],
+        'allowed' => [],
+
+        // Attribute donations that name no project to this one instead of leaving
+        // them unnamed. Useful when the sink serves a single project.
+        'default' => null,
+    ],
+
+    /**
+     * Accounting database (MariaDB or MySQL, through PDO).
+     *
+     * This is a SEPARATE database from the wallet. The wallet stays in SQLite at
+     * `database_path` and nothing in the accounting code ever opens it. If this
+     * database is down, misconfigured or simply not created yet, donations are
+     * still accepted and swapped as normal; the failure goes to the log and
+     * nowhere else.
+     *
+     * Create it with schema.sql, or leave `auto_migrate` on and let the first
+     * donation create the tables (which needs a database user with CREATE).
+     */
+    'accounting' => [
+        'enabled'  => false,
+        'dsn'      => 'mysql:host=localhost;dbname=donation_sink;charset=utf8mb4',
+        'username' => 'donation_sink',
+        'password' => 'put the database password here',
+
+        // Seconds to wait for a connection. Kept short on purpose: a donor should
+        // not be left waiting on a database that is not answering.
+        'timeout'  => 3,
+
+        // Create the schema when a table is missing. Turn this off once the schema
+        // exists and the database user has only SELECT, INSERT, UPDATE, DELETE.
+        'auto_migrate' => true,
+    ],
+
+    /**
+     * Dashboard (dashboard.php).
+     *
+     * IT HAS NO LOGIN OF ITS OWN. Put HTTP basic auth in front of it in the web
+     * server before enabling it - see README.md, "Protecting the dashboard".
+     * While `require_web_auth` is true the page refuses to render unless the web
+     * server has authenticated somebody, which catches the obvious accident but
+     * is not itself a lock.
+     */
+    'dashboard' => [
+        'enabled'          => false,
+        'require_web_auth' => true,
+
+        // Timezone the page groups days, months and years in. UTC is what the
+        // database stores, and the only value with no daylight-saving caveat.
+        'timezone'         => 'UTC',
+
+        'title'            => 'Donations',
+
+        // Most projects to list. Anything past this is cut from the bottom.
+        'max_projects'     => 200,
+    ],
 ];

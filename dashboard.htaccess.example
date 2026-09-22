@@ -1,0 +1,32 @@
+# HTTP basic auth for the donation dashboard.
+#
+# APACHE ONLY. nginx does not read .htaccess files at all, and never has - putting
+# this next to dashboard.php on an nginx host protects nothing. The nginx equivalent
+# is in README.md under "Protecting the dashboard", and it has a trap of its own.
+#
+# To use this on Apache:
+#
+#   1. htpasswd -c /etc/apache2/donation-dashboard.htpasswd yourname
+#      (drop the -c for every user after the first, or you overwrite the file)
+#   2. cp dashboard.htaccess.example .htaccess     # .htaccess is gitignored
+#   3. edit AuthUserFile below to the real path
+#   4. make sure the vhost allows overrides: AllowOverride AuthConfig
+#
+# Keep the password file outside the document root.
+
+<Files "dashboard.php">
+    AuthType Basic
+    AuthName "Donations"
+    AuthUserFile /path/outside/webroot/donation-dashboard.htpasswd
+    Require valid-user
+</Files>
+
+# config.php holds the seed phrase. If PHP ever stops being handled - a broken
+# module, a misconfigured vhost, a rename - it would otherwise be served as text.
+<FilesMatch "^(config\.php|config\.php\.example|schema\.sql|accounting\.php)$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>

@@ -24,3 +24,8 @@ config.php
 *~
 CLAUDE.md
 .claude/**
+
+# Web server drop-ins with real paths and real passwords
+.htaccess
+.htpasswd
+*.htpasswd

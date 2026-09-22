@@ -10,6 +10,7 @@ A PHP-based Cashu token donation receiver that accepts donations, swaps tokens t
 - **Multi-Currency**: Supports sat, usd, eur, and other currency units
 - **Auto-Melt**: Automatically converts to Lightning when per-mint balances reach thresholds
 - **Resilient**: If melting fails, tokens are safely stored for retry on next donation
+- **Per-project accounting** (optional): a donation can say who it is for, and a dashboard reports income per project, period, mint and unit. Off by default; see [Per-project accounting](#per-project-accounting-optional).
 
 ## How It Works
 
@@ -27,6 +28,10 @@ A PHP-based Cashu token donation receiver that accepts donations, swaps tokens t
 - SQLite3 extension (usually enabled by default)
 - Web server (Apache, Nginx, etc.)
 - Write permissions for database and log file directories
+
+Only if you turn on per-project accounting, which is off by default:
+
+- MariaDB 10.5+ or MySQL 8+, and PHP's `pdo_mysql` extension
 
 ## Installation
 
@@ -159,6 +164,9 @@ curl -X POST https://donations.example.com/donation-sink.php \
   -d "token=cashuBo2F0gaJhaU..."
 ```
 
+A donation can also name the project it is for, with an optional `project`
+parameter. See [Per-project accounting](#per-project-accounting-optional).
+
 ### Response Format
 
 Success:
@@ -178,6 +186,264 @@ Error:
   "message": "error description"
 }
 ```
+
+## Per-project accounting (optional)
+
+One sink can receive for many projects. A donation says who it is for, and a
+dashboard reports what each project earned over a period.
+
+**It is optional and off by default.** Clone this repository, leave the
+`accounting` and `dashboard` blocks out of `config.php`, and you get exactly the
+behaviour described above: the wallet in SQLite, no second database, no schema,
+no MariaDB. Turning it on adds a database that holds a ledger and nothing else.
+**No Cashu proof ever leaves SQLite.** Deleting the whole accounting database
+loses bookkeeping, never money.
+
+### Naming a project
+
+Add `project` to the request, as JSON, as a form field, or in the query string:
+
+```bash
+curl -X POST https://donations.example.com/donation-sink.php \
+  -H "Content-Type: application/json" \
+  -d '{"token":"cashuBo2F0gaJhaU...","project":"example-project"}'
+
+curl -X POST https://donations.example.com/donation-sink.php \
+  -d "token=cashuBo2F0gaJhaU...&project=example-project"
+
+curl -X POST "https://donations.example.com/donation-sink.php?project=example-project" \
+  -d "token=cashuBo2F0gaJhaU..."
+```
+
+The response repeats the project back, so the caller can check the attribution
+landed:
+
+```json
+{"status": "success", "message": "thank you", "project": "example-project"}
+```
+
+**A new project needs no setup.** There is no list to edit and nothing to
+restart: the first donation that names a project creates it. A donation with no
+project keeps working and is recorded as unnamed.
+
+A name is lowercased and must be 1 to 64 characters of ASCII letters, digits,
+dot, dash or underscore, starting with a letter or a digit. Anything else is
+refused with a 400 **before the token is touched**, so a rejected name costs the
+donor nothing: no mint has been contacted, no proof has been swapped, and the
+token can be sent again with a name that works.
+
+That narrow shape is the whole defence against a project name being anything
+other than a label. It cannot contain a slash, a dot-dot, a NUL, a quote or a
+newline, so there is nothing to traverse, nothing to inject and nothing that can
+forge a line in the log. Names reach SQL only as bound parameters and reach the
+dashboard only HTML-escaped; the character rule is a second lock on a door that
+is already shut.
+
+Nothing stops somebody inventing project names, but **inventing one costs
+money**: a project row is written only after a token has been swapped
+successfully, so each new name needs a real donation the mint accepted. The
+number of projects is therefore bounded by the number of paid donations. If you
+would still rather have a fixed list, set `project.allowed` in `config.php`; the
+default empty list accepts any well-formed name, which is the point of the
+feature.
+
+### What the numbers mean
+
+Income is attributed **at receipt**. When a token is swapped we know the amount,
+the mint, the unit and the project, so the donation row written at that moment is
+the ledger, and it never changes afterwards. That is what "project X earned N
+between A and B" means, and it is the number to quote.
+
+Paying out is a different question, because **melting is pooled**. The sink melts
+the whole balance of one mint and unit at once, and Cashu proofs carry no project
+label. Tagging proofs would mean writing into the wallet's own database, which
+holds bearer money and is the one thing this feature will not touch. So a melt is
+recorded as its own event and then **allocated to the donations it drained,
+oldest first**. Each donation therefore carries how much of it has been settled,
+and the dashboard can show:
+
+| Column | What it is |
+|---|---|
+| **Received** | Face value of the tokens. The income figure. |
+| **Credited** | What survived the mint's input fee on the swap. |
+| **Paid out** | The project's share of melts that actually drained it, as it reached the Lightning address. |
+| **Fees** | The mint's input fee plus the project's share of routing fees. |
+| **Adjusted** | Money that left the wallet without this sink recording where it went. |
+| **In wallet** | The rest, still held as proofs. |
+
+They reconcile exactly, for every project and every unit:
+
+```
+received = fees(input) + credited
+credited = paid out + fees(routing) + adjusted + in wallet
+```
+
+**Paid out lags, and is meant to.** A donation received today sits in the wallet
+until a balance crosses its melt threshold, so it shows as "in wallet", not as
+"paid out". Do not read "paid out" as this period's income; read "received".
+
+Two honest edges, both visible on the page rather than hidden:
+
+- A melt can drain more than the ledger knows about, because the wallet held
+  money from before accounting was switched on. The excess is allocated to no
+  donation at all and shows as **unattributed** in the payouts table, so the
+  allocations of a melt always sum to what left the wallet.
+- The wallet can spend outside this script: a melt recovered after a lost
+  response, a manual payment, a proof the mint declared spent. So at the start
+  of every donation, once any interrupted melt has been resolved and before this
+  one is swapped, the ledger is compared with the wallet's real balance and the
+  difference is booked as an **adjustment**, which pays nobody. Without it "in
+  wallet" would slowly become fiction. That is also the only moment the two are
+  comparable, which is why it happens there rather than at the end.
+
+### Currency
+
+**Units are never added together and never converted.** This sink has no
+exchange rate and inventing one would make the ledger a guess. Every total is
+per unit, and amounts are integers in that unit's own base denomination exactly
+as the mint expresses them: `sat` is a satoshi, `usd` and `eur` are cents (shown
+with a decimal point on the dashboard, stored as integers). A project that
+received both sats and cents has two rows and no combined figure.
+
+### The database
+
+Accounting lives in its own MariaDB database, created either by `schema.sql` or
+by the sink itself on the first donation. Five tables: `ds_projects`,
+`ds_donations` (the ledger), `ds_settlements` (melts and adjustments),
+`ds_settlement_allocations` (how each settlement was spread over donations) and
+`ds_meta`. The indexes are chosen so "income for project X between A and B" is a
+range scan of `ix_donations_project (project_id, unit, received_at)`.
+
+All timestamps are UTC. The dashboard can display another timezone, but UTC is
+the only setting with no daylight-saving caveat.
+
+**A donation is never lost to an accounting failure.** Every database call is
+wrapped: a database that is down, full, misconfigured or not created yet costs a
+ledger row and writes the reason to the log, and the donation is still accepted,
+swapped and melted as normal. The log line before the failed write carries the
+whole record, so it can be replayed by hand.
+
+### Enabling it
+
+1. Create the database and a user for it:
+
+   ```sql
+   CREATE DATABASE donation_sink CHARACTER SET utf8mb4;
+   CREATE USER 'donation_sink'@'localhost' IDENTIFIED BY 'a long random password';
+   GRANT SELECT, INSERT, UPDATE, DELETE ON donation_sink.* TO 'donation_sink'@'localhost';
+   FLUSH PRIVILEGES;
+   ```
+
+2. Create the schema as an administrator, so the web user never holds `CREATE`:
+
+   ```bash
+   mysql donation_sink < schema.sql
+   ```
+
+3. Fill in the `accounting` block in `config.php` and set
+   `'auto_migrate' => false`, since the schema now exists.
+
+Skipping steps 1 and 2 also works: grant the user `CREATE` as well, leave
+`auto_migrate` on, and the first donation builds the schema itself.
+
+## The dashboard
+
+`dashboard.php` shows income per project, over day, month or year buckets,
+filtered by period, mint and unit, with a CSV download. It is read-only: it never
+touches the wallet, never melts anything and never writes to the accounting
+database.
+
+Set `dashboard.enabled` to `true` in `config.php` to switch it on. It is off by
+default so that deploying the tree cannot expose income before the web server is
+configured.
+
+### Protecting the dashboard
+
+**The dashboard has no login of its own.** Authentication belongs to the web
+server, as HTTP basic auth.
+
+As a fuse against the obvious accident, the page refuses to render unless the web
+server tells it who the visitor is (`REMOTE_USER`, or an `Authorization` header
+PHP turns into `PHP_AUTH_USER`). That check confirms the protection is switched
+on; it is not itself a lock, and `dashboard.require_web_auth` turns it off if you
+protect the page some other way.
+
+Make the password file first, outside the document root:
+
+```bash
+htpasswd -c /etc/nginx/donation-dashboard.htpasswd yourname   # -c only for the first user
+```
+
+**On nginx** there is no `.htaccess`: nginx does not read those files and never
+has. The configuration goes in the vhost, and it has a trap worth stating plainly.
+PHP is normally handled by a **regex** location like `location ~ \.php$`, and in
+nginx a regex location beats a prefix one. A block written as
+`location ^~ /donation-sink/dashboard.php` would therefore win the match, take
+PHP handling with it, and serve the dashboard's **source** instead of running it.
+Use an exact match and repeat the PHP handling inside it:
+
+```nginx
+location = /donation-sink/dashboard.php {
+    auth_basic           "Donations";
+    auth_basic_user_file /etc/nginx/donation-dashboard.htpasswd;
+
+    # Same PHP handling as the vhost's `location ~ \.php$`, because this
+    # location replaces it rather than adding to it.
+    try_files      $uri =404;
+    fastcgi_pass   unix:/run/php-fpm/www.sock;
+    fastcgi_param  SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    include        fastcgi_params;
+
+    # nginx does not pass the authenticated user to FastCGI by default.
+    fastcgi_param  REMOTE_USER $remote_user;
+}
+```
+
+Check it before trusting it:
+
+```bash
+curl -si https://donations.example.com/donation-sink/dashboard.php | head -1   # expect 401
+curl -si -u yourname:… https://donations.example.com/donation-sink/dashboard.php | head -1  # expect 200
+```
+
+A `200` on the first command means the location is not matching. A `500` telling
+you the dashboard is unprotected on the second means the `REMOTE_USER` line is
+missing.
+
+**On Apache**, copy `dashboard.htaccess.example` to `.htaccess`, point
+`AuthUserFile` at the password file, and make sure the vhost allows
+`AllowOverride AuthConfig`. `.htaccess` is gitignored.
+
+### Keeping config.php out of reach
+
+`config.php` holds the seed phrase, and the seed phrase is the money. If the
+application tree lives inside the document root, one broken PHP handler is all
+that stands between the seed and a plain-text download. Either keep the tree
+outside the webroot, or point the sink at a configuration file that is:
+
+```nginx
+fastcgi_param DONATION_SINK_CONFIG /home/you/.donation-sink/config.php;
+```
+
+`donation-sink.php` and `dashboard.php` both honour `DONATION_SINK_CONFIG` and
+fall back to `config.php` next to the code.
+
+## Tests
+
+```bash
+php tests/accounting-test.php
+```
+
+Runs without a database and checks the parts that need none. To exercise the
+ledger, point it at a **throwaway** database, which it wipes before it starts:
+
+```bash
+DONATION_SINK_TEST_DSN='mysql:host=127.0.0.1;dbname=ds_test;charset=utf8mb4' \
+DONATION_SINK_TEST_USER=root DONATION_SINK_TEST_PASS= \
+php tests/accounting-test.php
+```
+
+Never point it at the database a live sink is using.
 
 ## How Balances Work
 
@@ -278,6 +544,12 @@ donation-sink/
 ├── config.php                 # Your configuration (gitignored)
 ├── config.php.example         # Configuration template
 ├── donation-sink.php          # Main endpoint
+├── accounting.php             # Optional per-project ledger (inert unless enabled)
+├── dashboard.php              # Optional read-only dashboard
+├── schema.sql                 # Accounting schema, generated from accounting.php
+├── dashboard.htaccess.example # Apache basic auth for the dashboard
+├── tests/
+│   └── accounting-test.php    # Tests for the accounting layer
 ├── .gitignore                 # Git ignore rules
 └── README.md                  # This file
 ```
