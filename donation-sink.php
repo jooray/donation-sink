@@ -220,6 +220,22 @@ function sendResponse(int $httpCode, string $status, string $message, array $con
     exit;
 }
 
+// A donation is welcome from anywhere, which is the whole idea, so a browser on
+// somebody else's page may send one. That needs CORS, and it is safe here
+// precisely because there is nothing to protect: no cookies, no session, no
+// credentials, and the only thing a caller can do is give us money. The origin
+// is echoed as `*` rather than reflected, so nothing about the caller is
+// remembered or trusted.
+header('Access-Control-Allow-Origin: *');
+header('Vary: Origin');
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    header('Access-Control-Allow-Methods: POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type');
+    header('Access-Control-Max-Age: 600');
+    http_response_code(204);
+    exit;
+}
+
 // Only accept POST requests
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     sendResponse(405, 'error', 'Method not allowed. Use POST.', $config, null);
