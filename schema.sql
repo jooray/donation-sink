@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS ds_donations (
     amount_token    BIGINT UNSIGNED NOT NULL,
     amount_credited BIGINT UNSIGNED NOT NULL,
     settled_amount  BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    -- NULL for an ordinary donation. 'opening' for the balance the wallet
+    -- already held when accounting started, so the dashboard can show it
+    -- as an opening balance rather than as income earned on that date.
+    source          VARCHAR(16) NULL,
     PRIMARY KEY (id),
     KEY ix_donations_project (project_id, unit, received_at),
     KEY ix_donations_period (received_at, project_id),
@@ -73,5 +77,5 @@ CREATE TABLE IF NOT EXISTS ds_settlement_allocations (
     KEY ix_alloc_project (project_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO ds_meta (k, v) VALUES ('schema_version', '1')
+INSERT INTO ds_meta (k, v) VALUES ('schema_version', '2')
     ON DUPLICATE KEY UPDATE v = VALUES(v);

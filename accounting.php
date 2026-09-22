@@ -62,7 +62,14 @@ function log_safe(string $value, int $max = 200): string
 final class Accounting
 {
     /** Bumped when the schema below changes; recorded in ds_meta. */
-    public const SCHEMA_VERSION = 1;
+    public const SCHEMA_VERSION = 2;
+
+    /**
+     * A donation row that is not a donation: the balance the wallet already held when
+     * accounting was switched on. Someone donated that money, we just were not
+     * counting yet, so it belongs to a project even though no POST created it.
+     */
+    public const SOURCE_OPENING = 'opening';
 
     /** A settlement is either a Lightning melt we performed, or a correction. */
     public const REASON_MELT = 'melt';
@@ -194,19 +201,21 @@ final class Accounting
         string $unit,
         int $amountToken,
         int $amountCredited,
-        ?string $project
+        ?string $project,
+        ?string $source = null
     ): ?int {
         $describe = 'project=' . ($project ?? '-') . ' mint=' . log_safe($mintUrl) . ' unit=' . log_safe($unit)
-            . ' token=' . $amountToken . ' credited=' . $amountCredited;
+            . ' token=' . $amountToken . ' credited=' . $amountCredited
+            . ($source === null ? '' : ' source=' . log_safe($source));
 
-        return $this->guard('record donation (' . $describe . ')', function () use ($mintUrl, $unit, $amountToken, $amountCredited, $project) {
+        return $this->guard('record donation (' . $describe . ')', function () use ($mintUrl, $unit, $amountToken, $amountCredited, $project, $source) {
             $pdo = $this->pdo();
             $projectId = $project === null ? null : $this->projectId($project);
 
             $st = $pdo->prepare(
                 'INSERT INTO ds_donations
-                    (received_at, project_id, mint_url, unit, amount_token, amount_credited, settled_amount)
-                 VALUES (?, ?, ?, ?, ?, ?, 0)'
+                    (received_at, project_id, mint_url, unit, amount_token, amount_credited, settled_amount, source)
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?)'
             );
             $st->execute([
                 gmdate('Y-m-d H:i:s'),
@@ -215,10 +224,59 @@ final class Accounting
                 self::clip($unit, 16),
                 max(0, $amountToken),
                 max(0, $amountCredited),
+                $source === null ? null : self::clip($source, 16),
             ]);
 
             return (int)$pdo->lastInsertId();
         });
+    }
+
+    /**
+     * Claim the balance the wallet already held for a project.
+     *
+     * Switching accounting on mid-life leaves real money in the wallet that no ledger
+     * row explains. Left alone it surfaces as `unattributed` the first time a melt
+     * drains it, which is honest but useless when you know perfectly well whose money
+     * it is. This writes one donation row for it, so it is attributed, and FIFO spends
+     * it first, which is also the truth: it arrived before everything else.
+     *
+     * It refuses to run twice for the same mint and unit, because a second opening
+     * balance would invent money. Returns the row id, or null if one already exists
+     * or the write failed.
+     */
+    public function recordOpeningBalance(string $mintUrl, string $unit, int $amount, string $project): ?int
+    {
+        if ($amount <= 0) {
+            return null;
+        }
+        if ($this->hasOpeningBalance($mintUrl, $unit)) {
+            $this->log('ACCOUNTING: refusing a second opening balance for '
+                . log_safe($mintUrl) . ' ' . log_safe($unit));
+            return null;
+        }
+        return $this->recordDonation($mintUrl, $unit, $amount, $amount, $project, self::SOURCE_OPENING);
+    }
+
+    /** True when an opening balance has already been claimed for this mint and unit. */
+    public function hasOpeningBalance(string $mintUrl, string $unit): bool
+    {
+        return (bool)$this->guard('opening balance check', function () use ($mintUrl, $unit) {
+            $st = $this->pdo()->prepare(
+                'SELECT 1 FROM ds_donations WHERE mint_url = ? AND unit = ? AND source = ? LIMIT 1'
+            );
+            $st->execute([self::clip($mintUrl, 255), self::clip($unit, 16), self::SOURCE_OPENING]);
+            return $st->fetchColumn() !== false;
+        });
+    }
+
+    /** Donation rows recorded so far for a mint and unit, opening balance included. */
+    public function donationCount(string $mintUrl, string $unit): int
+    {
+        return (int)($this->guard('donation count', function () use ($mintUrl, $unit) {
+            $st = $this->pdo()->prepare('SELECT COUNT(*) FROM ds_donations WHERE mint_url = ? AND unit = ?');
+            $st->execute([self::clip($mintUrl, 255), self::clip($unit, 16)]);
+            return (int)$st->fetchColumn();
+        }) ?? 0);
     }
 
     /**
@@ -520,7 +578,8 @@ final class Accounting
                         SUM(d.amount_token)                             AS received,
                         SUM(d.amount_credited)                          AS credited,
                         SUM(d.amount_token - d.amount_credited)         AS input_fee,
-                        SUM(d.amount_credited - d.settled_amount)       AS outstanding
+                        SUM(d.amount_credited - d.settled_amount)       AS outstanding,
+                        SUM(CASE WHEN d.source = \'opening\' THEN d.amount_credited ELSE 0 END) AS opening
                    FROM ds_donations d
                    LEFT JOIN ds_projects p ON p.id = d.project_id
                   WHERE ' . $where . '
@@ -538,6 +597,7 @@ final class Accounting
                     'credited'    => (int)$r['credited'],
                     'input_fee'   => (int)$r['input_fee'],
                     'outstanding' => (int)$r['outstanding'],
+                    'opening'     => (int)$r['opening'],
                     'paid_out'    => 0,
                     'routing_fee' => 0,
                     'adjusted'    => 0,
@@ -858,6 +918,10 @@ final class Accounting
                 amount_token    BIGINT UNSIGNED NOT NULL,
                 amount_credited BIGINT UNSIGNED NOT NULL,
                 settled_amount  BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                -- NULL for an ordinary donation. 'opening' for the balance the wallet
+                -- already held when accounting started, so the dashboard can show it
+                -- as an opening balance rather than as income earned on that date.
+                source          VARCHAR(16) NULL,
                 PRIMARY KEY (id),
                 KEY ix_donations_project (project_id, unit, received_at),
                 KEY ix_donations_period (received_at, project_id),

@@ -274,6 +274,62 @@ is_same($broken->projectTotals('2000-01-01 00:00:00', '2100-01-01 00:00:00', nul
 ok(true, 'nothing above threw');
 
 // ---------------------------------------------------------------------------
+// The opening balance: money that arrived before anyone was counting.
+// ---------------------------------------------------------------------------
+
+echo "Opening balance\n";
+
+$open = Accounting::fromConfig($config, $logger);
+foreach (['ds_settlement_allocations', 'ds_settlements', 'ds_donations', 'ds_projects'] as $t) {
+    $pdo->exec("DELETE FROM $t");
+}
+
+is_same($open->hasOpeningBalance('https://old.example.com', 'sat'), false,
+    'a fresh pool has no opening balance');
+is_same($open->donationCount('https://old.example.com', 'sat'), 0, 'and no donations');
+
+$openId = $open->recordOpeningBalance('https://old.example.com', 'sat', 188, 'cashupayserver');
+ok($openId !== null, 'the balance already in the wallet can be claimed for a project');
+is_same($open->hasOpeningBalance('https://old.example.com', 'sat'), true, 'and it is remembered');
+
+is_same($open->recordOpeningBalance('https://old.example.com', 'sat', 188, 'cashupayserver'), null,
+    'claiming it twice would invent money, so the second attempt refuses');
+is_same($open->donationCount('https://old.example.com', 'sat'), 1, 'and writes no second row');
+is_same($open->recordOpeningBalance('https://old.example.com', 'sat', 0, 'cashupayserver'), null,
+    'an empty wallet has nothing to claim');
+
+$totals = $open->projectTotals('2000-01-01 00:00:00', '2100-01-01 00:00:00', null, null);
+is_same(count($totals), 1, 'it shows up as exactly one project row');
+is_same($totals[0]['project'], 'cashupayserver', 'under the project it was claimed for');
+is_same($totals[0]['received'], 188, 'counted as that project money');
+is_same($totals[0]['opening'], 188,
+    'and flagged as an opening balance, so the date is not read as when it was earned');
+
+// FIFO has to drain it first: it is the oldest money in the pool.
+$later = $open->recordDonation('https://old.example.com', 'sat', 50, 50, 'nsite-clay');
+$open->recordMelt('https://old.example.com', 'sat', 200, 8, 'q-open', 'ln@example.com', null);
+$after = [];
+foreach ($open->projectTotals('2000-01-01 00:00:00', '2100-01-01 00:00:00', null, null) as $r) {
+    $after[$r['project']] = $r;
+}
+is_same($after['cashupayserver']['outstanding'], 0, 'the opening balance is spent before newer money');
+// 188 + 50 credited, 200 paid + 8 fee spent: the opening balance goes first and
+// the newer donation gives up the remaining 20.
+is_same($after['nsite-clay']['outstanding'], 30, 'and the newer donation keeps the remainder');
+is_same($after['cashupayserver']['opening'], 188, 'spending it does not stop it being an opening balance');
+
+$unattributed = 0;
+foreach ($open->settlements('2000-01-01 00:00:00', '2100-01-01 00:00:00', null, null) as $st) {
+    $unattributed += (int)$st['unattributed'];
+}
+is_same($unattributed, 0, 'and nothing is left unattributed, which was the whole point');
+
+$ordinary = $open->recordDonation('https://plain.example.com', 'sat', 10, 10, 'alpha');
+ok($ordinary !== null, 'an ordinary donation still records');
+$plain = $open->projectTotals('2000-01-01 00:00:00', '2100-01-01 00:00:00', null, 'https://plain.example.com');
+is_same($plain[0]['opening'], 0, 'and is not mistaken for an opening balance');
+
+// ---------------------------------------------------------------------------
 // schema.sql, and the auto_migrate = false path an operator ends up on.
 // ---------------------------------------------------------------------------
 

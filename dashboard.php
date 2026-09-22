@@ -176,7 +176,7 @@ if (($_GET['format'] ?? '') === 'csv') {
     // The escape argument is passed explicitly because its default changes in PHP 8.4
     // and leaving it out is deprecated there; the value is what every version used.
     fputcsv($out, ['project', 'unit', 'donations', 'received', 'credited',
-        'input_fee', 'paid_out', 'routing_fee', 'adjusted', 'outstanding'], ',', '"', '\\');
+        'input_fee', 'paid_out', 'routing_fee', 'adjusted', 'outstanding', 'opening'], ',', '"', '\\');
     foreach ($totals as $row) {
         fputcsv($out, [
             $row['project'] ?? '(unnamed)',
@@ -189,6 +189,7 @@ if (($_GET['format'] ?? '') === 'csv') {
             $row['routing_fee'],
             $row['adjusted'],
             $row['outstanding'],
+            $row['opening'],
         ], ',', '"', '\\');
     }
     fclose($out);
@@ -219,7 +220,8 @@ foreach ($totals as $row) {
     $u = $row['unit'];
     if (!isset($grand[$u])) {
         $grand[$u] = ['donations' => 0, 'received' => 0, 'credited' => 0, 'input_fee' => 0,
-                      'paid_out' => 0, 'routing_fee' => 0, 'adjusted' => 0, 'outstanding' => 0];
+                      'paid_out' => 0, 'routing_fee' => 0, 'adjusted' => 0, 'outstanding' => 0,
+                      'opening' => 0];
     }
     foreach ($grand[$u] as $k => $_) {
         $grand[$u][$k] += $row[$k];
@@ -302,6 +304,7 @@ header('Referrer-Policy: no-referrer');
   .scroll { overflow-x: auto; }
   .note { color: var(--muted); font-size: 13px; max-width: 70ch; }
   .zero { color: var(--muted); }
+  .opening { color: var(--muted); font-size: .85em; white-space: nowrap; }
   a { color: var(--accent); }
   code { font-size: 12.5px; }
 </style>
@@ -394,7 +397,8 @@ header('Referrer-Policy: no-referrer');
       <td><a href="<?= h(selfUrl(['project' => $row['project'] ?? '(unnamed)'])) ?>"><?= h($row['project'] ?? '(unnamed)') ?></a></td>
       <td><?= h($row['unit']) ?></td>
       <td><?= number_format($row['donations']) ?></td>
-      <td><?= amount($row['received'], $row['unit']) ?></td>
+      <td><?= amount($row['received'], $row['unit']) ?><?php if ($row['opening'] > 0): ?><span
+          class="opening" title="Balance the wallet already held when accounting started, claimed for this project. Not money received on this date."> incl. <?= amount($row['opening'], $row['unit']) ?> opening</span><?php endif; ?></td>
       <td><?= amount($row['credited'], $row['unit']) ?></td>
       <td><?= amount($row['paid_out'], $row['unit']) ?></td>
       <td><?= amount($row['input_fee'] + $row['routing_fee'], $row['unit']) ?></td>

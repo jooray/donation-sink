@@ -323,6 +323,31 @@ ledger row and writes the reason to the log, and the donation is still accepted,
 swapped and melted as normal. The log line before the failed write carries the
 whole record, so it can be replayed by hand.
 
+### Money that arrived before you switched this on
+
+Accounting only counts what it saw. If the sink has been running for a while, the
+wallet holds real money no ledger row explains, and it surfaces as **unattributed**
+the first time a melt drains it. That is honest, and useless when you know perfectly
+well whose money it is.
+
+`bin/opening-balance.php` writes one donation row for the balance a pool already
+holds, marked `opening`, so it is attributed to a project and FIFO spends it first,
+which is also the truth: it arrived before anything the ledger did see. The dashboard
+shows it next to that project's **Received** figure as `incl. N opening`, so nobody
+reads it as income earned on the day you ran the tool.
+
+It reads the wallet and never writes to it. Run it **before the first donation** under
+accounting, and only once per mint and unit; it refuses a second claim, because a
+second opening balance would invent money.
+
+```bash
+php bin/opening-balance.php                                          # which pools hold anything
+php bin/opening-balance.php --mint=https://mint.example --project=myproject
+php bin/opening-balance.php --mint=https://mint.example --project=myproject --commit
+```
+
+Nothing is written without `--commit`.
+
 ### Enabling it
 
 1. Create the database and a user for it:
