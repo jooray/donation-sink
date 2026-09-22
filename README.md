@@ -448,6 +448,20 @@ nginx a regex location beats a prefix one. A block written as
 PHP handling with it, and serve the dashboard's **source** instead of running it.
 Use an exact match and repeat the PHP handling inside it:
 
+Whatever web server you use, **serve the two entry points and nothing else**. This
+directory holds a `config.php` with a seed phrase in it, a vendored wallet library and
+a CLI tool. Deny by default and name what is allowed, rather than listing what to
+hide: a list of things to hide is wrong the moment a file is added, which is exactly
+what happened here when `held.php` arrived after the list was written.
+
+```nginx
+# Ahead of the vhost's `location ~ \.php$`: nginx takes the first matching regex
+# location in file order, so below it every file here would be handed to PHP.
+location ~ ^/donation-sink/(?!donation-sink\.php$|dashboard\.php$) {
+    return 404;
+}
+```
+
 ```nginx
 location = /donation-sink/dashboard.php {
     auth_basic           "Donations";
